@@ -58,3 +58,5 @@ venv.bak/
 *.json
 results/
 output/
+data/raw/
+*.parquet
