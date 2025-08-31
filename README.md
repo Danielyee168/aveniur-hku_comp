@@ -1,6 +1,7 @@
 # ReadMe
 ## Intro
-……
+We participated in the THE WEB 3.0 QUANTITATIVE TRADING CHALLENGE(https://www.kaggle.com/competitions/avenir-hku-web/overview) hosted by Avenir and the University of Hong Kong.
+We sucessfully made it into the second round of this competition which is implementation of our strategy for live trading.
 ## Structure
 project-root/  
 ├── src/          # 主要源代码  
