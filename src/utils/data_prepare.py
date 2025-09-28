@@ -2,19 +2,37 @@ import os
 import glob
 import pandas as pd
 import multiprocessing as mp
+from pathlib import Path
+import json
 
 os.makedirs('./data/min_data', exist_ok=True)
 os.makedirs('./data/hour_data', exist_ok=True)
 os.makedirs('./data/daily_data', exist_ok=True)
+os.makedirs('./data/factors', exist_ok=True)
+os.makedirs('./register', exist_ok=True)
+os.makedirs('./data/factors/risk', exist_ok=True)
+os.makedirs('./data/factors/alpha', exist_ok=True)
 
 # ---------- hyper parameter ----------
-MIN_DIR   = './data/min_data'
-HOUR_OUT  = './data/hour_data/all_hour_data.parquet'
-DAILY_OUT = './data/daily_data/all_daily_data.parquet'
-CHUNK_DAYS = 30                # how many days to process in one chunk
+MIN_DIR = './data/min_data'
+HOUR_OUT = './data/hour_data/all_data.parquet'
+DAILY_OUT = './data/daily_data/all_data.parquet'
+CHUNK_DAYS = 60                # how many days to process in one chunk
 MAX_WORKERS = mp.cpu_count()
 
+
 # ---------- tool funcs ----------
+def create_empty_registry(file_path: str):
+    """Create an empty factor registry file"""
+    file_path = Path(file_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    empty_registry = {}
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(empty_registry, f, indent=2, ensure_ascii=False)
+    print(f"An empty registry file has been created: {file_path}")
+
+
 def resample_data(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     """resample data to specified frequency"""
     if df.empty:
@@ -44,10 +62,14 @@ def process_one_chunk(file_chunk: list) -> tuple[pd.DataFrame, pd.DataFrame]:
     # resample
     h = resample_data(df, '1H')
     d = resample_data(df, '1D')
+    h.rename({'order_book_id': 'symbol'}, axis=1, inplace=True)
+    d.rename({'order_book_id': 'symbol'}, axis=1, inplace=True)
     return h, d
+
 
 # ---------- main process ----------
 def main(wokers: int = MAX_WORKERS):
+    create_empty_registry("./register/factor_registry.json")
     files = sorted(glob.glob(os.path.join(MIN_DIR, '*.parquet')))
     if not files:
         print('no files found.')
