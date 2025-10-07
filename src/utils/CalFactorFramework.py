@@ -137,20 +137,25 @@ class FactorCalculator:
         # Batch by date, processing each batch using multiple processes
         all_results = []
         total_batches = (len(target_dates) - 1) // batch_size + 1
-        last = 0
+        start = 0
+        batch_idx = 0
 
-        for i in range(batch_size, len(target_dates), batch_size):
-            chunk_dates = target_dates[last:i]
-            print(f"Processing Date Batch {i // batch_size + 1}/{total_batches}: {chunk_dates[0]} 到 {chunk_dates[-1]}")
+        while start < len(target_dates):
+            end = min(start + batch_size, len(target_dates))
+            chunk_dates = target_dates[start:end]
+            if not chunk_dates:
+                break
 
-            # Calculate the current batch using multiprocessing
+            batch_idx += 1
+            print(f"Processing Date Batch {batch_idx}/{total_batches}: {chunk_dates[0]} 到 {chunk_dates[-1]}")
+
             chunk_result = self.calculate_factor(
                 factor_func=factor_func,
                 frequency=frequency,
                 fields=fields,
                 dates=chunk_dates,
                 symbols=symbols,
-                parallel=True,
+                parallel=n_jobs > 1,
                 n_jobs=n_jobs,
                 factor_name=factor_name,
                 factor_type=factor_type,
@@ -158,20 +163,30 @@ class FactorCalculator:
                 batch_size=None,
                 **factor_kwargs
             )
-            last = max(last, i - window_size)
+
             if not chunk_result.empty:
                 all_results.append(chunk_result)
 
-            # Forced garbage collection
             gc.collect()
+
+            if window_size > 0:
+                start = max(end - window_size, start + 1)
+            else:
+                start = end
 
         factor_df = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
 
         factor_path = self.data_root / f"{frequency}_data" / f"{factor_type}" / f"factor_{factor_name}.parquet"
-        factor_df = factor_df.drop_duplicates()
-        factor_df.dropna(inplace=True)
-        factor_df.sort_values(['timestamp', 'symbol'])
-        factor_df.to_parquet(factor_path, index=False)
+        if not factor_df.empty:
+            factor_df = factor_df.drop_duplicates()
+            factor_df.dropna(inplace=True)
+            if {'timestamp', 'symbol'}.issubset(factor_df.columns):
+                factor_df = factor_df.sort_values(['timestamp', 'symbol'])
+            factor_path.parent.mkdir(parents=True, exist_ok=True)
+            factor_df.to_parquet(factor_path, index=False)
+        else:
+            warnings.warn("No factor results produced for the requested date range.")
+
         return factor_df
 
     def _parallel_calculation_with_batching(self,
@@ -368,9 +383,9 @@ class FactorCalculator:
                 else:
                     df = pd.read_parquet(file_path)
 
-                # Add date information
+                # Add date information without overwriting the original timestamp
                 date_str = file_path.stem.replace("data", "")
-                df['timestamp'] = date_str
+                df['trade_date'] = date_str
 
                 all_data.append(df)
 
@@ -658,7 +673,7 @@ class FactorRegistry:
                     **factor_kwargs
                 )
             else:
-                calculator_kwargs['parallel'] = is_parallel,
+                calculator_kwargs['parallel'] = is_parallel
                 return self.calculator.calculate_factor(
                     **calculator_kwargs,
                     **factor_kwargs

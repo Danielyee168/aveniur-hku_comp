@@ -58,3 +58,4 @@ venv.bak/
 *.json
 results/
 output/
+data/min_data/
