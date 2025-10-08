@@ -53,3 +53,8 @@ def daily_group_keys(df: pd.DataFrame) -> Tuple[pd.Series, Tuple[pd.Series, pd.S
     trade_date = ensure_trade_date(df)
     key = (df["symbol"], trade_date)
     return trade_date, key
+
+
+def hour_bucket(series: pd.Series) -> pd.Series:
+    """Floor millisecond timestamps to the nearest UTC hour."""
+    return pd.to_datetime(series, errors="coerce", utc=True, unit="ms").dt.floor("1h")

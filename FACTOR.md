@@ -30,6 +30,21 @@ Corwin–Schultz two-day spread estimator using consecutive daily high/low pairs
 ## max_daily
 Rolling maximum daily return (default 21 days). Uses daily close-to-close returns and broadcasts to minute bars. Columns: `Close`.
 
+## vmom_hourly
+Volatility-managed hourly momentum. Aggregates minute bars to hourly closes, computes `MOM = log(C_t) - log(C_{t-L})` and divides by `sqrt(sum r^2)` over `vol_window` (default `lookback=8`, `vol_window=8`). Broadcast back to minutes. Columns: `Close`.
+
+## resmom_hourly
+Residual momentum relative to a market benchmark. Fits rolling beta of each asset’s hourly log return versus `market_symbol` (default BTCUSDT) over `regression_window`, sums past residuals over `momentum_window`, and maps to minutes. Needs sufficient history (`regression_window` ≥ 72). Columns: `Close`; ensure the benchmark symbol is present.
+
+## lar_hourly
+Liquidity-adjusted reversal. Hourly reversal (`-sum` of past returns) times z-scored Amihud illiquidity (`|r| / (Close×Volume)`). Uses `reversal_window` (default 6) and `illiq_window` (default 48) hours for smoothing. Columns: `Close`, `Volume`.
+
+## vov_shock_hourly
+Volatility-of-volatility shock. Builds hourly realized variance over `rv_window` hours, then z-scores innovations versus a rolling median/MAD over `shock_window`; signal is the negative shock (defaults `rv_window=6`, `shock_window=96`). Columns: `Close`.
+
+## bab_hourly
+Hourly low-volatility (BAB-style) factor. Estimates rolling standard deviation of hourly log returns over `vol_window` (default 96), cross-sectionally z-scores each hour, and multiplies by `-1` to favour low-vol symbols. Columns: `Close`.
+
 ## Running Factors via CalFactorFramework
 Use the registry to load data and emit each factor:
 

@@ -10,6 +10,11 @@ from .garman_klass import compute as garman_klass_compute, register as register_
 from .rogers_satchell import compute as rogers_satchell_compute, register as register_rogers_satchell
 from .corwin_schultz import compute as corwin_schultz_compute, register as register_corwin_schultz
 from .max_daily import compute as max_daily_compute, register as register_max_daily
+from .vmom_hourly import compute as vmom_hourly_compute, register as register_vmom_hourly
+from .resmom_hourly import compute as resmom_hourly_compute, register as register_resmom_hourly
+from .lar_hourly import compute as lar_hourly_compute, register as register_lar_hourly
+from .vov_shock_hourly import compute as vov_shock_hourly_compute, register as register_vov_shock_hourly
+from .bab_hourly import compute as bab_hourly_compute, register as register_bab_hourly
 
 __all__ = [
     "rv_daily_compute",
@@ -32,4 +37,14 @@ __all__ = [
     "register_corwin_schultz",
     "max_daily_compute",
     "register_max_daily",
+    "vmom_hourly_compute",
+    "register_vmom_hourly",
+    "resmom_hourly_compute",
+    "register_resmom_hourly",
+    "lar_hourly_compute",
+    "register_lar_hourly",
+    "vov_shock_hourly_compute",
+    "register_vov_shock_hourly",
+    "bab_hourly_compute",
+    "register_bab_hourly",
 ]
