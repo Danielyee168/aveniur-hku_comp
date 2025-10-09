@@ -24,12 +24,16 @@ DEFAULT_FREQUENCY = "min"
 def _skew_transform(group: pd.Series) -> pd.Series:
     if group.isna().all():
         return pd.Series(0.0, index=group.index)
+
     centered = group - group.mean()
-    var = centered.pow(2).mean()
-    if var <= 1e-16:
+    sum_sq = centered.pow(2).sum()
+    sum_cu = centered.pow(3).sum()
+
+    if sum_sq <= 1e-16:
         val = 0.0
     else:
-        val = centered.pow(3).mean() / (var ** 1.5)
+        val = sum_cu / (sum_sq ** 1.5)
+
     return pd.Series(val, index=group.index)
 
 

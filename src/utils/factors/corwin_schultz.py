@@ -21,7 +21,7 @@ DESCRIPTION = "Corwin–Schultz two-day spread estimator"
 CATEGORY = "liquidity"
 DEFAULT_FREQUENCY = "min"
 
-DENOM = 3.0 - 2.0 * np.sqrt(2.0)
+K = 2.0 - np.sqrt(2.0)
 
 
 def compute(data: pd.DataFrame) -> pd.DataFrame:
@@ -50,9 +50,9 @@ def compute(data: pd.DataFrame) -> pd.DataFrame:
         np.minimum(daily.loc[mask, "Low"], daily.loc[mask, "prev_low"])
     ) ** 2
 
+    beta_adj = np.maximum(beta - gamma, 0.0)
     with np.errstate(invalid="ignore"):
-        alpha = (np.sqrt(2.0 * beta) - np.sqrt(beta)) / DENOM
-        alpha -= np.sqrt(gamma / DENOM)
+        alpha = (np.sqrt(2.0 * beta_adj) - np.sqrt(beta_adj)) / K
         spread = 2.0 * (np.exp(alpha) - 1.0) / (1.0 + np.exp(alpha))
 
     daily[FACTOR_NAME] = 0.0
