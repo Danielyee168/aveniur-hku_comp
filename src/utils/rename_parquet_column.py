@@ -13,15 +13,16 @@ def rename_obid_to_symbol(parquet_path: str) -> str:
     try:
         tbl = pd.read_parquet(path)
     except Exception as e:
-        return f'[WARN] 读取失败 {path}: {e}'
+        return f'[WARN] fail to load {path}: {e}'
 
     if 'order_book_id' not in tbl.columns:
-        return None  # 无需处理
+        print(f'{path} don not need to be processed')
+        return None
 
-    # 重命名列
+    # rename the target column
     tbl.rename({'order_book_id':'symbol'}, inplace=True, axis=1)
     tbl.to_parquet(parquet_path)
-    return f'[INFO] 已处理 {path}'
+    return f'[INFO] done {path}'
 
 
 def main():

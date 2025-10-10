@@ -1,3 +1,8 @@
+# --------------
+# auth: NewbieWong
+# version: 10/2/2025
+# --------------
+
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Callable, Optional
@@ -147,7 +152,7 @@ class FactorCalculator:
                 break
 
             batch_idx += 1
-            print(f"Processing Date Batch {batch_idx}/{total_batches}: {chunk_dates[0]} 到 {chunk_dates[-1]}")
+            print(f"Processing Date Batch {batch_idx}/{total_batches}: {chunk_dates[0]} to {chunk_dates[-1]}")
 
             chunk_result = self.calculate_factor(
                 factor_func=factor_func,
