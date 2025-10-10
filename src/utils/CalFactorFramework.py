@@ -6,13 +6,27 @@
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Callable, Optional
+import math
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import pyarrow.parquet as pq
 import os
 import gc
+from collections import defaultdict
+import logging
 import warnings
+
+warnings.filterwarnings("ignore")
+
+
+# Configuration Log
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger("FactorRegistry")
 
 
 class FactorCalculator:
@@ -236,7 +250,7 @@ class FactorCalculator:
                     if not result.empty:
                         results.append(result)
                 except Exception as e:
-                    warnings.warn(f"批次计算失败: {str(e)}")
+                    warnings.warn(f"fail to calculate in batches mode: {str(e)}")
 
         # Merge results
         if results:
@@ -316,14 +330,14 @@ class FactorCalculator:
         """Parallel loading of minute-level data (I/O intensive task)"""
 
         def load_single_file(file_path):
-            """加载单个文件"""
+            """load single file"""
             try:
-                # 只读取需要的列
+                # only load columns that are required
                 if fields:
-                    # 先读取schema确定哪些列存在
+                    # read schema to see what columns exit
                     schema = pq.read_schema(file_path)
                     available_fields = [col for col in fields if col in schema.names]
-                    # 添加必要列
+                    # add necessary columns
                     required_cols = ['symbol']
                     for col in required_cols:
                         if col in schema.names and col not in available_fields:
@@ -336,13 +350,13 @@ class FactorCalculator:
                 else:
                     df = pd.read_parquet(file_path)
 
-                # 添加日期信息
+                # add date info
                 date_str = file_path.stem.replace("data", "")
                 df['trade_date'] = date_str
 
                 return df
             except Exception as e:
-                warnings.warn(f"加载文件 {file_path} 失败: {str(e)}")
+                warnings.warn(f"raise error when load file {file_path} : {str(e)}")
                 return pd.DataFrame()
 
         # Use a thread pool to read in parallel (IO-intensive tasks)
@@ -475,21 +489,42 @@ class FactorCalculator:
 
             return result
         except Exception as e:
-            warnings.warn(f"直接计算失败: {str(e)}")
+            warnings.warn(f"fail to calculate directly: {str(e)}")
             return pd.DataFrame()
+
+
+# customized error
+class FactorRegistryError(Exception): pass
+class FactorNotFoundError(FactorRegistryError): pass
+class FactorFunctionNotFound(FactorRegistryError): pass
 
 
 class FactorRegistry:
     """Factor Registry - Focused on Factor Information Management and Persistence"""
-
+    # Update Type Enumeration
+    UPDATE_TYPE_DATA = "data_update"  # Category One Update: Only add the latest data
+    UPDATE_TYPE_LOGIC = "logic_update"  # Category 2 update: logic changes, recalculation required
+    ACTION_DELETE = "delete"
     def __init__(self, calculator=None, registry_file: str = './register/factor_registry.json'):
         self.calculator = calculator
-        self._factors = {}  # Factor Registry
+        self._factors = {}  # Factor Registry: name -> info
+        self._logs = defaultdict(list)  # name -> list of log entries
         self._registry_file = registry_file
+
+        self._log_file = Path('./logs/factor_update_log.json')
+        self._log_file.parent.mkdir(parents=True, exist_ok=True)
 
         # If a registry file is specified, attempt to load it
         if registry_file and Path(registry_file).exists():
             self.load_from_file(registry_file)
+
+        if self._log_file.exists():
+            try:
+                with open(self._log_file, 'r', encoding='utf-8') as f:
+                    raw_logs = json.load(f)
+                    self._logs = defaultdict(list, {k: v for k, v in raw_logs.items()})
+            except Exception as e:
+                logger.warning(f"Failed to load logs from {self._log_file}: {e}")
 
     def register(self,
                  name: str,
@@ -499,7 +534,6 @@ class FactorRegistry:
                  type_: str,
                  category: str,
                  description: str = "",
-                 window_size: int = 0,
                  **kwargs):
         """
         Factor Registration
@@ -511,30 +545,41 @@ class FactorRegistry:
             description: Factor Description
             category: Factor Subcategories
             type_: Factor categories, risk or alpha
-            window_size: the rolling window size when calculate this factor
             **kwargs: Other parameters (such as default parameters, etc.)
         """
+        # Get the module path and full name of a function (supports nested functions)
+        try:
+            module_name = factor_func.__module__
+            qualname = factor_func.__qualname__  # Support class methods and nested functions
+        except AttributeError:
+            raise ValueError(f"Function {factor_func} must have __module__ and __qualname__")
+
         # Basic Information
         factor_info = {
-            'func': factor_func,
+            'func_module': module_name,
+            'func_qualname': qualname,
             'frequency': frequency,
             'fields': fields or [],
             'description': description,
             'created_time': datetime.now().isoformat(),
             'updated_time': datetime.now().isoformat(),
             'type': type_,
-            'category': category,
-            'window_size': window_size
+            'category': category
         }
 
         # Add other parameters
         factor_info.update(kwargs)
+
+        # Log registration as logic update
+        self._log_update(name, self.UPDATE_TYPE_LOGIC, f"Registered new factor: {module_name}.{qualname}")
 
         self._factors[name] = factor_info
 
         # Automatically save to file
         if self._registry_file:
             self._save_metadata(self._registry_file)
+
+        logger.info(f"Factor '{name}' registered: {module_name}.{qualname}")
 
     def _save_metadata(self, file_path: str) -> bool:
         """Save factor metadata to a JSON file"""
@@ -574,13 +619,20 @@ class FactorRegistry:
                 if name in self._factors:
                     # Update the metadata of existing factors while retaining the functions
                     for k, v in info.items():
-                        if k != 'func':
+                        if not k.startswith('func_'):
                             self._factors[name][k] = v
-                    self._factors[name]['updated_time'] = datetime.now().isoformat()
+                    self._factors[name]['updated_time'] = datetime.now(timezone.utc).isoformat()
+                    self._log_update(name, self.UPDATE_TYPE_DATA, "Metadata updated from file")
                 else:
                     # New factor, requires manual registration of functions later
+                    info['func_module'] = None
+                    info['func_qualname'] = None
+                    info['created_time'] = datetime.now(timezone.utc).isoformat()
+                    info['updated_time'] = datetime.now(timezone.utc).isoformat()
                     self._factors[name] = info
-                    self._factors[name]['func'] = None
+                    self._log_update(name, self.UPDATE_TYPE_DATA, "Loaded from file (function not bound)")
+
+                logger.info(f"Loaded metadata for {len(metadata)} factors from {file_path}")
 
             print(f"Loaded metadata for {len(metadata)} factors from {file_path}")
             return True
@@ -597,7 +649,9 @@ class FactorRegistry:
                 'fields': info['fields'],
                 'created_time': info['created_time'],
                 'updated_time': info['updated_time'],
-                'has_function': info.get('func') is not None
+                'type': info['type'],
+                'category': info['category'],
+                'has_function': (info.get('func_module') is not None and info.get('func_qualname') is not None)
             }
             for name, info in self._factors.items()
         }
@@ -606,43 +660,101 @@ class FactorRegistry:
         """Obtain detailed information about specific factors"""
         if name not in self._factors:
             return None
-        return {k: v for k, v in self._factors[name].items() if k != 'func'}
+        return {k: v for k, v in self._factors[name].items() if not k.startswith('func_')}
 
-    def update_factor(self, name: str, **kwargs) -> bool:
+    def update_factor(self, name: str, update_type: str = UPDATE_TYPE_DATA, **kwargs) -> bool:
         """Update factor information"""
         if name not in self._factors:
-            print(f"Factor '{name}' is not registered")
-            return False
+            raise FactorNotFoundError(f"Factor '{name}' is not registered")
 
-        # 更新信息
+        # update info
         for k, v in kwargs.items():
-            if k != 'func':  # Cannot directly update the function
+            if not k.startswith('func_'):  # Cannot directly update the function
                 self._factors[name][k] = v
 
-        # 更新修改时间
-        self._factors[name]['updated_time'] = datetime.now().isoformat()
+        # update modification time
+        self._factors[name]['updated_time'] = datetime.now(timezone.utc).isoformat()
 
-        # 保存到文件
+        # Log the update
+        reason = kwargs.pop('reason', 'Manual update')
+        self._log_update(name, update_type, reason)
+
+        # save to file
         if self._registry_file:
             self._save_metadata(self._registry_file)
 
+        logger.info(f"Factor '{name}' updated [{update_type}]: {reason}")
         return True
 
-    def register_function(self, name: str, factor_func: Callable) -> bool:
-        """Register a function for factors with already loaded metadata"""
+    def _log_update(self, name: str, update_type: str, message: str):
+        """Internal: log an update or deletion"""
+        log_entry = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'type': update_type,
+            'message': message
+        }
+        # --- save all log to file ---
+        try:
+            with open(self._log_file, 'w', encoding='utf-8') as f:
+                # save whole _logs dict
+                json.dump(dict(self._logs), f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to save log to {self._log_file}: {str(e)}")
+
+    def get_update_log(self, name: str) -> List[Dict]:
+        """Get update history for a factor"""
         if name not in self._factors:
-            print(f"Metadata for factor '{name}' not found")
-            return False
+            raise FactorNotFoundError(f"Factor '{name}' not found")
+        return self._logs.get(name, []).copy()
 
-        self._factors[name]['func'] = factor_func
-        self._factors[name]['updated_time'] = datetime.now().isoformat()
+    def delete_factor(self, name: str, reason: str = "Manual deletion") -> bool:
+        """Delete a factor and log it"""
+        if name not in self._factors:
+            raise FactorNotFoundError(f"Factor '{name}' not found")
 
-        # Save to file
+        del self._factors[name]
+        self._log_update(name, self.ACTION_DELETE, reason)
+
         if self._registry_file:
             self._save_metadata(self._registry_file)
 
-        print(f"Function has been registered for factor '{name}'")
+        logger.info(f"Factor '{name}' deleted: {reason}")
         return True
+
+    def _get_function(self, name: str) -> Callable:
+        """Internal: resolve function from module and qualname"""
+        info = self._factors.get(name)
+        if not info:
+            raise FactorNotFoundError(f"Factor '{name}' not found")
+
+        module_name = info.get('func_module')
+        qualname = info.get('func_qualname')
+
+        if not module_name or not qualname:
+            raise FactorFunctionNotFound(
+                f"Function for factor '{name}' is not bound (module={module_name}, qualname={qualname})")
+
+        try:
+            module = __import__(module_name, fromlist=[qualname.split('.')[0]])
+            func = module
+            for attr in qualname.split('.'):
+                func = getattr(func, attr)
+            return func
+        except Exception as e:
+            raise FactorFunctionNotFound(f"Failed to import {module_name}.{qualname}: {str(e)}")
+
+    def call_factor(self, name: str, **kwargs):
+        """
+        Call the registered factor function directly.
+        Use this to invoke the function with arbitrary args.
+        """
+        func = self._get_function(name)
+        logger.debug(f"Calling factor function '{name}'")
+        try:
+            return func(**kwargs)
+        except Exception as e:
+            logger.error(f"Error calling factor '{name}': {str(e)}")
+            raise
 
     def calculate(self, name: str, is_batch: bool, is_parallel: bool = True,
                   dates: List[str] = None, symbols: List[str] = None,
@@ -650,17 +762,27 @@ class FactorRegistry:
                   **factor_kwargs) -> any:
         """Calculate the registered factors"""
         if name not in self._factors:
-            raise ValueError(f"Factor '{name}' is not registered")
+            raise FactorNotFoundError(f"Factor '{name}' is not registered")
 
         factor_info = self._factors[name]
+        func = self._get_function(name)  # Will raise if not found
 
         if factor_info.get('func') is None:
             raise ValueError(f"Metadata for factor '{name}' has been loaded, but the function is not registered.")
 
+        # calculate window size to fill data
+        if factor_info['frequency'] == 'min':
+            ws = math.ceil((factor_kwargs.get('window', 1) - 1) / 1440)
+        else:
+            ws = factor_kwargs.get('window', 1) - 1
+
+        if ws < 0:
+            ws = 0
+
         # If you have a calculator, use the calculator to calculate.
         if self.calculator:
             calculator_kwargs = {
-                'factor_func': factor_info['func'],
+                'factor_func': func,
                 'frequency': factor_info['frequency'],
                 'fields': factor_info['fields'],
                 'dates': dates,
@@ -669,7 +791,7 @@ class FactorRegistry:
                 'batch_size': batch_size,
                 'factor_name': name,
                 'factor_type': factor_info['type'],
-                'window_size': factor_info['window_size'],
+                'window_size': ws,
             }
 
             if is_batch:
@@ -685,7 +807,24 @@ class FactorRegistry:
                 )
         else:
             # Directly call the function
-            return factor_info['func'](**factor_kwargs)
+            return func(**factor_kwargs)
+
+    def get_factor_data(self, name: str, **query_kwargs):
+        """
+        Retrieve already calculated factor data.
+        Assumes the calculator has a method `get_factor_data`.
+        """
+        if not self.calculator:
+            raise FactorRegistryError("No calculator attached to retrieve data")
+
+        if not hasattr(self.calculator, 'get_factor_data'):
+            raise FactorRegistryError("Calculator does not support 'get_factor_data' method")
+
+        try:
+            return self.calculator.get_factor_data(factor_name=name, **query_kwargs)
+        except Exception as e:
+            logger.error(f"Failed to retrieve data for factor '{name}': {str(e)}")
+            raise
 
     def set_registry_file(self, file_path: str):
         """Set registry file path"""
@@ -698,108 +837,3 @@ class FactorRegistry:
         else:
             print("Registry file path not set")
             return False
-
-
-def momentum(data, window=20):
-    """动量因子 - 需要rolling计算"""
-    data.set_index('timestamp', inplace=True)
-    data['factor'] = data.groupby('symbol')['Close'].pct_change(window)
-    return data.reset_index()[['timestamp', 'symbol', 'factor']]
-
-
-def volatility(data, window=30):
-    """波动率因子 - 需要rolling计算"""
-    data.set_index('timestamp', inplace=True)
-    data = data.groupby('symbol')['Close'].rolling(window).std().reset_index()
-    data.rename({'Close': 'factor'}, axis=1, inplace=True)
-    return data
-
-
-def simple_factor(data):
-    """简单因子 - 不需要rolling计算"""
-    data.set_index(['symbol', 'timestamp'], inplace=True)
-    return (data['Close'] / data['Open'] - 1).reset_index().rename({0: 'factor'}, axis=1)
-
-# 使用示例
-if __name__ == "__main__":
-
-    # 实例化计算框架
-    factor_calculator = FactorCalculator("../../data/")
-
-    # 创建注册表
-    registry = FactorRegistry(factor_calculator, "../../data/register/factor_registry.json")
-
-    # 注册因子
-    registry.register(
-        name="momentum",
-        factor_func=momentum,
-        frequency="daily",
-        fields=["Close"],
-        description="价格动量因子",
-        category="trend",
-        type_='alpha',
-        window_size= 20
-    )
-
-    registry.register(
-        name="volatility",
-        factor_func=volatility,
-        frequency="daily",
-        fields=["Close"],
-        description="历史波动率",
-        category="risk",
-        type_='alpha',
-        window_size=30
-    )
-
-    registry.register(
-        name="simple_factor",
-        factor_func=simple_factor,
-        frequency="daily",
-        fields=["Close", "Open"],
-        description="简单价差因子",
-        category="general",
-        type_='alpha'
-    )
-
-    # 使用
-    symbols = ['BTCUSDT', 'ETHUSDT', 'BCHUSDT', 'XRPUSDT', 'LTCUSDT', 'TRXUSDT']
-
-    # 方法1: 普通并行计算，自动分批
-    result1 = registry.calculate(
-        "momentum",
-        symbols=symbols,
-        is_batch=False,
-        is_parallel=True,
-        n_jobs=4,
-        batch_size=60,
-        window=20
-    )
-    print(f"动量因子结果形状: {result1.shape}")
-
-    # 方法2: 增量计算，结合日期分批和进程内标的分批
-    result2 = registry.calculate(
-        "volatility",
-        is_batch=True,
-        symbols=symbols,
-        batch_size=120,  # 每次处理2天数据
-        n_jobs=2,  # 使用2个进程
-        window=30
-    )
-
-    print(f"波动率因子结果形状: {result2.shape}")
-
-    result3 = registry.calculate(
-        "simple_factor",
-        symbols=symbols,
-        is_batch=False,
-        is_parallel=True,
-        n_jobs=2,
-        batch_size=90  # 每批2天数据
-    )
-
-    print(f"简单因子结果形状: {result3.shape}")
-
-    # 查看所有因子
-    factors = registry.list_factors()
-    print("已注册因子:", list(factors.keys()))
