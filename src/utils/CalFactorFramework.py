@@ -43,7 +43,7 @@ class FactorCalculator:
                          symbols: List[str] = None,
                          parallel: bool = True,
                          n_jobs: int = 4,
-                         batch_size: int = 30,
+                         parallel_batch_size: int = 30,
                          factor_name: str = None,
                          factor_type: str = None,
                          window_size: int = 0,
@@ -93,7 +93,7 @@ class FactorCalculator:
             # Parallel computing, using a batching strategy
             factor_df = self._parallel_calculation_with_batching(
                 factor_func, data, window_size, n_jobs,
-                batch_size, factor_kwargs)
+                parallel_batch_size, factor_kwargs)
 
         factor_df = factor_df.drop_duplicates()
         factor_df.dropna(inplace=True)
@@ -108,6 +108,7 @@ class FactorCalculator:
                                      dates: List[str] = None,
                                      symbols: List[str] = None,
                                      batch_size: int = 180,
+                                     parallel_batch_size: int = 30,
                                      n_jobs: int = 4,
                                      factor_name: str = None,
                                      factor_type: str = None,
@@ -123,6 +124,7 @@ class FactorCalculator:
             symbols: List of targets
             n_jobs: Number of parallel tasks
             batch_size: The batch size, None means determined automatically
+            parallel_batch_size: size of the data processed in each parallel tasks
             factor_kwargs: Parameters passed to the factor function
             factor_name: name of the factor,
             factor_type: 'alpha' or 'risk',
@@ -174,12 +176,13 @@ class FactorCalculator:
                 fields=fields,
                 dates=chunk_dates,
                 symbols=symbols,
-                parallel=n_jobs > 1,
+                # parallel=(n_jobs > 1) & (len(chunk_dates) > parallel_batch_size),
+                parallel=(n_jobs > 1),
                 n_jobs=n_jobs,
                 factor_name=factor_name,
                 factor_type=factor_type,
                 window_size=window_size,
-                batch_size=None,
+                parallel_batch_size=parallel_batch_size,
                 **factor_kwargs
             )
 
@@ -213,11 +216,11 @@ class FactorCalculator:
                                             data: pd.DataFrame,
                                             window_size: int,
                                             n_jobs: int,
-                                            batch_size: int,
+                                            parallel_batch_size: int,
                                             factor_kwargs: Dict) -> pd.DataFrame:
         """Parallel computing with batching"""
 
-        batches = self._create_date_batches(data, window_size, batch_size)
+        batches = self._create_date_batches(data, window_size, parallel_batch_size)
 
         # If there is no batch (small amount of data), compute directly.
         if len(batches) == 1:
@@ -267,6 +270,8 @@ class FactorCalculator:
             n_dates = len(dates)
             batch_size = max(1, n_dates // (os.cpu_count() * 2))
 
+        batch_size = batch_size * 1440
+
         batches = []
         last = 0
         for i in range(batch_size, len(dates), batch_size):
@@ -275,7 +280,10 @@ class FactorCalculator:
             batches.append(batch_data)
             last = i - window_size
 
-        return batches
+        if len(batches) > 0:
+            return batches
+        else:
+            return [data[data['timestamp'].isin(dates)].copy()]
 
     @staticmethod
     def _calculate_batch(factor_func: Callable, batch_data: pd.DataFrame,
@@ -477,6 +485,7 @@ class FactorCalculator:
     def _direct_calculation(self, factor_func: Callable, data: pd.DataFrame,
                             factor_kwargs: Dict) -> pd.DataFrame:
         """Direct calculation"""
+        print(f'Calculating {factor_func.__name__}...')
         if data.empty:
             return pd.DataFrame()
 
@@ -510,6 +519,8 @@ class FactorRegistry:
         self._factors = {}  # Factor Registry: name -> info
         self._logs = defaultdict(list)  # name -> list of log entries
         self._registry_file = registry_file
+
+        self.data_root = Path('./data')
 
         self._log_file = Path('./logs/factor_update_log.json')
         self._log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -758,7 +769,7 @@ class FactorRegistry:
 
     def calculate(self, name: str, is_batch: bool, is_parallel: bool = True,
                   dates: List[str] = None, symbols: List[str] = None,
-                  batch_size: int = 180, n_jobs: int = 4,
+                  batch_size: int = 180, parallel_batch_size: int = 20, n_jobs: int = 4,
                   **factor_kwargs) -> any:
         """Calculate the registered factors"""
         if name not in self._factors:
@@ -767,7 +778,7 @@ class FactorRegistry:
         factor_info = self._factors[name]
         func = self._get_function(name)  # Will raise if not found
 
-        if factor_info.get('func') is None:
+        if factor_info.get('func_qualname') is None:
             raise ValueError(f"Metadata for factor '{name}' has been loaded, but the function is not registered.")
 
         # calculate window size to fill data
@@ -788,13 +799,14 @@ class FactorRegistry:
                 'dates': dates,
                 'symbols': symbols,
                 'n_jobs': n_jobs,
-                'batch_size': batch_size,
+                'parallel_batch_size': parallel_batch_size,
                 'factor_name': name,
                 'factor_type': factor_info['type'],
                 'window_size': ws,
             }
 
             if is_batch:
+                calculator_kwargs['batch_size'] = batch_size
                 return self.calculator.calculate_factor_incremental(
                     **calculator_kwargs,
                     **factor_kwargs
@@ -814,14 +826,9 @@ class FactorRegistry:
         Retrieve already calculated factor data.
         Assumes the calculator has a method `get_factor_data`.
         """
-        if not self.calculator:
-            raise FactorRegistryError("No calculator attached to retrieve data")
-
-        if not hasattr(self.calculator, 'get_factor_data'):
-            raise FactorRegistryError("Calculator does not support 'get_factor_data' method")
-
         try:
-            return self.calculator.get_factor_data(factor_name=name, **query_kwargs)
+            pq_path = self.data_root / "factors" / f"{self._factors[name]['type']}" / f"factor_{name}.parquet"
+            return pd.read_parquet(pq_path)
         except Exception as e:
             logger.error(f"Failed to retrieve data for factor '{name}': {str(e)}")
             raise

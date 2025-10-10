@@ -3,13 +3,13 @@
 # version: 10/2/2025
 # --------------
 
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional, List, Union
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List, Tuple, Union
-from pathlib import Path
+import logging
+from dataclasses import dataclass
+from pandas.tseries.frequencies import to_offset
 import warnings
 from scipy import stats
 import json
@@ -18,124 +18,152 @@ from datetime import datetime
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
 
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-DEFAULT_RESULTS_FILE = "./results/backtest_results.json"
+@dataclass
+class BacktestContext:
+    """
+    增强版上下文：支持原始 DataFrame 输入与动态收益计算
+    """
+    # 原始输入
+    factor_df: pd.DataFrame  # 必须包含: symbol, timestamp, {factor_name}
+    factor_name: str         # 指定因子列名
+    price_data: pd.DataFrame # 价格数据: symbol, timestamp, price
+
+    # 回测配置
+    rebalance_freq: str      # 调仓频率，如 '4H', '1D'
+    offset: Optional[str] = None  # 时间偏移，如 '2H' 表示 4H 调仓从 02:00 开始
+    forward_periods: int = 1  # 计算几期后的收益（如 4H 调仓，forward_periods=1 表示计算未来 4H 收益）
+
+    # 预处理配置
+    winsorize: bool = True
+    winsorize_limits: tuple = (0.01, 0.99)
+    standardize: bool = True
+    min_data_points: int = 10
+    handle_missing: str = "drop"  # "drop" or "interpolate"
+
+    # 元数据
+    universe: str = "all"
+    asset_id_col: str = "symbol"
+    timestamp_col: str = "timestamp"
+    price_col: str = "price"
 
 # -------------------------
 # BaseBacktest
 # -------------------------
 class BaseBacktester(ABC):
     """
-    Enhanced base class supporting flexible prediction horizon and offset alignment.
+    base class of backtesters
     """
-
-    def __init__(self,
-                 price_data: pd.DataFrame,
-                 factor_data: pd.DataFrame,
-                 frequency: str = 'D',
-                 offset: Optional[pd.Timedelta] = None,
-                 prediction_horizon: Optional[pd.Timedelta] = None,
-                 benchmark: Optional[pd.Series] = None,
-                 risk_free_rate: float = 0.0):
-        """
-        Args:
-            prediction_horizon: How far into the future to predict (e.g., 4H, 6H). Default = frequency.
-        """
-        self.price_data = self._align_data(price_data)
-        self.factor_data = self._align_data(factor_data)
-        self.frequency = frequency
-        self.offset = offset or pd.Timedelta(seconds=0)
-        self.prediction_horizon = prediction_horizon or pd.Timedelta(self.frequency)
-        self.benchmark = benchmark
-        self.risk_free_rate = risk_free_rate
-
-        # Align timestamps
-        self.factor_timestamps = self._get_aligned_timestamps()
-        self.returns = self._compute_forward_returns()
-
-    def _get_aligned_timestamps(self) -> pd.DatetimeIndex:
-        """Get factor timestamps after offset."""
-        ts = self.factor_data.index.get_level_values('timestamp').unique()
-        return (ts + self.offset)
-
-    def _compute_forward_returns(self) -> pd.Series:
-        """Compute forward returns over prediction_horizon."""
-        # Pivot prices
-        price_wide = self.price_data.unstack('symbol')
-        if isinstance(price_wide, pd.Series):
-            price_wide = price_wide.to_frame('price')
-        if 'value' in price_wide.columns:
-            price_wide = price_wide['value'].unstack('symbol')
-
-        # Resample to desired frequency if needed
-        price_wide = price_wide.resample(self.frequency).last()
-
-        # Forward-looking horizon
-        future_time = self.prediction_horizon
-        future_prices = price_wide.shift(-1).resample(self.frequency).last()  # Assume aligned
-        current_prices = price_wide
-
-        # Forward return: (P[t+h] - P[t]) / P[t]
-        forward_rets = (future_prices / current_prices - 1).stack()
-        forward_rets.index.names = ['timestamp', 'symbol']
-        forward_rets = forward_rets.swaplevel()
-
-        # Only keep timestamps that exist in factor_data (after offset)
-        factor_ts = self.factor_timestamps
-        return forward_rets[forward_rets.index.get_level_values('timestamp').isin(factor_ts)]
-
-    def _align_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure multi-index (symbol, timestamp)."""
-        if isinstance(df.index, pd.MultiIndex):
-            return df
-        elif 'symbol' in df.columns and 'timestamp' in df.columns:
-            return df.set_index(['symbol', 'timestamp'])
-        else:
-            # Wide format: index=timestamp, columns=symbols
-            s = df.stack()
-            s.index.names = ['timestamp', 'symbol']
-            return s.to_frame('value').swaplevel().sort_index()
-
-    def _validate_data(self):
-        assert len(self.factor_data) > 0, "Empty factor data."
-        assert len(self.returns) > 0, "Empty or misaligned returns."
-        assert self.factor_data.index.is_monotonic_increasing, "Factor data not sorted."
+    def __init__(self, config: Dict[str, Any] = None):
+        self.config = config or {}
+        self.logger = logger
 
     @abstractmethod
-    def run(self, **kwargs):
+    def run(self, context: BacktestContext) -> Dict[str, Any]:
         pass
 
-    def _annualize(self, ratio: float, base_period: str = 'D') -> float:
-        freq_map = {'D': 252, 'H': 252 * 24, '15T': 252 * 24 * 4}
-        periods_per_year = freq_map.get(base_period, 252)
-        return ratio * np.sqrt(periods_per_year)
+    # —————————————————— Data Preprocessing and Alignment —————————————————— #
+    def _validate_input(self, context: BacktestContext):
+        """Validate input data format"""
+        required_cols = [context.asset_id_col, context.timestamp_col, context.factor_name]
+        if not all(col in context.factor_df.columns for col in required_cols):
+            raise ValueError(f"factor_df must contain columns: {required_cols}")
 
-    def _max_drawdown(self, cum_rets: pd.Series) -> float:
-        rolling_max = cum_rets.expanding().max()
-        drawdown = (cum_rets - rolling_max) / rolling_max
-        return drawdown.min()
+        if not all(col in context.price_data.columns for col in [context.asset_id_col, context.timestamp_col, context.price_col]):
+            raise ValueError(f"price_data must contain columns: {context.asset_id_col}, {context.timestamp_col}, {context.price_col}")
 
-    def _sharpe_ratio(self, returns: pd.Series) -> float:
-        excess = returns - self.risk_free_rate / 252  # Assume annualized rate
-        sharpe = excess.mean() / excess.std()
-        return self._annualize(sharpe, self.frequency[0])
+    def _prepare_panel(self, context: BacktestContext) -> pd.DataFrame:
+        """
+        Convert raw data into aligned panel data
+        return: MultiIndex [timestamp, symbol], columns: factor, return
+        """
+        self._validate_input(context)
 
-    def _stats_report(self, returns: pd.Series, name: str = "Strategy") -> Dict[str, float]:
-        cum_ret = (1 + returns).prod() - 1
-        ann_ret = (1 + cum_ret) ** (252 / len(returns)) - 1 if len(returns) > 0 else 0
-        ann_vol = returns.std() * np.sqrt(252)
-        sharpe = self._sharpe_ratio(returns)
-        mdd = self._max_drawdown((1 + returns).cumprod())
-        calmar = ann_ret / abs(mdd) if mdd != 0 else np.inf
+        factor_df = context.factor_df.copy()
+        price_df = context.price_data.copy()
 
+        asset_col = context.asset_id_col
+        time_col = context.timestamp_col
+
+        # Set Index
+        factor_df = factor_df.set_index([time_col, asset_col]).sort_index()
+        price_df = price_df.set_index([time_col, asset_col])[context.price_col].sort_index()
+
+        # Merger Factor and Price
+        df = factor_df[[context.factor_name]].join(price_df, how='inner')
+        if df.empty:
+            raise ValueError("No overlapping data between factor and price")
+
+        # Resample to rebalancing frequency (supports offset)
+        freq = context.rebalance_freq
+        if context.offset:
+            freq = freq + " " + context.offset  # 如 '4H 2H' → 每 4H，从 2H 开始
+
+        # Grouped Resampling
+        def resample_group(group):
+            # Resample by group for each asset
+            return group.resample(freq).last()
+
+        factor_aligned = df[context.factor_name].groupby(level=1).apply(resample_group)
+        price_aligned = df[context.price_col].groupby(level=1).apply(resample_group)
+
+        # cal forward return
+        holding_periods = context.forward_periods
+        returns = price_aligned.groupby(level=1).pct_change(holding_periods).shift(-holding_periods)
+
+        # Alignment Factors and Returns
+        panel = pd.concat([factor_aligned, returns], axis=1, keys=['factor', 'return']).dropna()
+        panel = panel.replace([np.inf, -np.inf], np.nan).dropna()
+
+        if len(panel) < context.min_data_points:
+            raise ValueError(f"Insufficient data after alignment: {len(panel)} < {context.min_data_points}")
+
+        return panel  # MultiIndex [timestamp, symbol]
+
+    # —————————————————— General preprocessing —————————————————— #
+
+    def _winsorize(self, series: pd.Series, limits: tuple) -> pd.Series:
+        if not self.config.get("winsorize", True):
+            return series
+        low, high = series.quantile(limits[0]), series.quantile(limits[1])
+        return series.clip(lower=low, upper=high)
+
+    def _standardize(self, series: pd.Series) -> pd.Series:
+        if not self.config.get("standardize", True):
+            return series
+        mean, std = series.mean(), series.std()
+        return (series - mean) / (std + 1e-8)
+
+    def _preprocess(self, panel: pd.DataFrame, context: BacktestContext) -> pd.DataFrame:
+        """Unified preprocessing pipeline"""
+        factor = panel['factor']
+        returns = panel['return']
+
+        # drop the extreme values
+        factor = self._winsorize(factor, context.winsorize_limits)
+
+        # standardization
+        factor = self._standardize(factor)
+
+        # return the panel data after process
+        return pd.concat([factor, returns], axis=1, keys=['factor', 'return'])
+
+    # —————————————————— tool function —————————————————— #
+
+    def get_metadata(self, context: BacktestContext, panel: pd.DataFrame) -> Dict[str, Any]:
+        """提取元数据"""
         return {
-            'Cumulative Return': cum_ret,
-            'Annualized Return': ann_ret,
-            'Annualized Volatility': ann_vol,
-            'Sharpe Ratio': sharpe,
-            'Max Drawdown': mdd,
-            'Calmar Ratio': calmar,
-            'Win Rate': (returns > 0).mean() if len(returns) > 0 else 0.0
+            "factor_name": context.factor_name,
+            "rebalance_freq": context.rebalance_freq,
+            "offset": context.offset,
+            "forward_periods": context.forward_periods,
+            "universe": context.universe,
+            "n_assets": panel.index.get_level_values('symbol').nunique(),
+            "n_dates": panel.index.get_level_values(context.timestamp_col).nunique(),
+            "config": self.config
         }
 
 
