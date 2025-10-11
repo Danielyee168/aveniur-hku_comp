@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import pyarrow.parquet as pq
 import os
+import re
 import gc
 from collections import defaultdict
 import logging
@@ -31,9 +32,9 @@ logger = logging.getLogger("FactorRegistry")
 
 class FactorCalculator:
     """Factor Calculation Engine - Improved Version, Supports Batch Multi-Process Computing"""
-
+    data_root = Path("./data")
     def __init__(self, data_root: str = "./data"):
-        self.data_root = Path(data_root)
+        FactorCalculator.data_root = Path(data_root)
 
     def calculate_factor(self,
                          factor_func: Callable,
@@ -72,28 +73,36 @@ class FactorCalculator:
         if factor_type is None:
             factor_type = "alpha" if "alpha" in factor_name.lower() else "risk"
 
-        # 1. Data Loading
-        data = self._load_data(frequency, dates, fields)
-
-        # 2. Data Validation and Preprocessing
-        data = self._validate_and_preprocess(data, symbols)
-
-        if data.empty:
-            warnings.warn("The loaded data is empty. Please check the data path and date/target filter conditions.")
-            return pd.DataFrame()
-
         factor_path = self.data_root / "factors" / f"{factor_type}" / f"factor_{factor_name}.parquet"
 
-        # 3. Calculate
-        if not parallel:
+        if not parallel or frequency != "min":
             # Direct calculation
+            # 1. Data Loading
+            data = FactorCalculator._load_data(frequency, dates, fields)
+
+            # 2. Data Validation and Preprocessing
+            data = FactorCalculator._validate_and_preprocess(data, symbols)
+
+            if data.empty:
+                warnings.warn("The loaded data is empty. Please check the data path and date/target filter conditions.")
+                return pd.DataFrame()
+
             factor_df = self._direct_calculation(factor_func, data, factor_kwargs)
 
         else:
+            if dates is None:
+                all_files = os.listdir(self.data_root / 'min_data')
+                dates = []
+                for name in all_files:
+                    match = re.search(r'data(\d{8})\.parquet', name)
+                    if match:
+                        dates.append(match.group(1))
+                dates.sort()
+
             # Parallel computing, using a batching strategy
             factor_df = self._parallel_calculation_with_batching(
-                factor_func, data, window_size, n_jobs,
-                parallel_batch_size, factor_kwargs)
+                factor_func, dates, window_size, n_jobs,
+                parallel_batch_size, frequency, fields, symbols, factor_kwargs)
 
         factor_df = factor_df.drop_duplicates()
         factor_df.dropna(inplace=True)
@@ -213,17 +222,25 @@ class FactorCalculator:
 
     def _parallel_calculation_with_batching(self,
                                             factor_func: Callable,
-                                            data: pd.DataFrame,
+                                            dates: List[str],
                                             window_size: int,
                                             n_jobs: int,
                                             parallel_batch_size: int,
+                                            frequency: str,
+                                            fields: List[str],
+                                            symbols: List[str],
                                             factor_kwargs: Dict) -> pd.DataFrame:
         """Parallel computing with batching"""
 
-        batches = self._create_date_batches(data, window_size, parallel_batch_size)
+        batches = self._create_date_batches(dates, window_size, parallel_batch_size)
 
         # If there is no batch (small amount of data), compute directly.
         if len(batches) == 1:
+            # 1. Data Loading
+            data = FactorCalculator._load_data(frequency, dates, fields)
+
+            # 2. Data Validation and Preprocessing
+            data = FactorCalculator._validate_and_preprocess(data, symbols)
             return self._direct_calculation(factor_func, data, factor_kwargs)
 
         # Set the number of processes
@@ -235,13 +252,10 @@ class FactorCalculator:
         # Parallel processing batch
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             futures = []
-            for i, batch_data in enumerate(batches):
-                # Create a data copy for each batch to avoid data sharing issues between processes.
-                batch_data_copy = batch_data.copy()
-
+            for i, batch_dates in enumerate(batches):
                 # Submit Task
                 future = executor.submit(FactorCalculator._calculate_batch, factor_func,
-                                         batch_data_copy, i, factor_kwargs)
+                                         batch_dates, i, fields, symbols, frequency, factor_kwargs)
 
                 futures.append(future)
 
@@ -259,38 +273,38 @@ class FactorCalculator:
         if results:
             return pd.concat(results, ignore_index=True)
         else:
-            return pd.DataFrame()
+            return pd.DataFrame({'symbol':'error', 'timestamp':'0', 'test':0}, index=[0])
 
-    def _create_date_batches(self, data: pd.DataFrame, window_size: int, batch_size: int) -> List[pd.DataFrame]:
+    def _create_date_batches(self, dates: List[str], window_size: int, batch_size: int) -> List[List[str]]:
         """Create data batches by date"""
-        dates = sorted(data['timestamp'].unique())
 
         if batch_size is None:
             # Automatically determine batch size
             n_dates = len(dates)
             batch_size = max(1, n_dates // (os.cpu_count() * 2))
 
-        batch_size = batch_size * 1440
-
         batches = []
         last = 0
         for i in range(batch_size, len(dates), batch_size):
             batch_dates = dates[last:i]
-            batch_data = data[data['timestamp'].isin(batch_dates)].copy()
-            batches.append(batch_data)
+            batches.append(batch_dates)
             last = i - window_size
 
         if len(batches) > 0:
             return batches
         else:
-            return [data[data['timestamp'].isin(dates)].copy()]
+            return [dates]
 
     @staticmethod
-    def _calculate_batch(factor_func: Callable, batch_data: pd.DataFrame,
-                         batch_id: int, factor_kwargs: Dict) -> pd.DataFrame:
+    def _calculate_batch(factor_func: Callable, batch_dates: List[str],
+                         batch_id: int, fields: List[str], symbols: List[str], frequency: str, factor_kwargs: Dict) -> pd.DataFrame:
         """Calculate a single batch"""
         try:
-            result = factor_func(batch_data, **factor_kwargs)
+            data = FactorCalculator._load_data(frequency, batch_dates, fields)
+
+            # 2. Data Validation and Preprocessing
+            data = FactorCalculator._validate_and_preprocess(data, symbols)
+            result = factor_func(data, **factor_kwargs)
 
             # Standardized result format
             if isinstance(result, pd.Series):
@@ -299,18 +313,20 @@ class FactorCalculator:
             return result
         except Exception as e:
             warnings.warn(f"Batch {batch_id} calculation failed: {str(e)}")
-            return pd.DataFrame()
+            return pd.DataFrame({'symbol':'error', 'timestamp':'0', 'test':0}, index=[0])
 
-    def _load_data(self, frequency: str, dates: List[str], fields: List[str]) -> pd.DataFrame:
+    @staticmethod
+    def _load_data(frequency: str, dates: List[str], fields: List[str]) -> pd.DataFrame:
         """Data Loading Main Function"""
-        data_path = self.data_root / f"{frequency}_data"
+        data_path = FactorCalculator.data_root / f"{frequency}_data"
 
         if frequency == "min":
-            return self._load_minute_data_optimized(data_path, dates, fields)
+            return FactorCalculator._load_minute_data_optimized(data_path, dates, fields)
         else:
-            return self._load_other_frequency_data(data_path, dates, fields)
+            return FactorCalculator._load_other_frequency_data(data_path, dates, fields)
 
-    def _load_minute_data_optimized(self, data_path: Path, dates: List[str], fields: List[str]) -> pd.DataFrame:
+    @staticmethod
+    def _load_minute_data_optimized(data_path: Path, dates: List[str], fields: List[str]) -> pd.DataFrame:
         """Optimized minute-level data loading"""
         # Confirm the file to be loaded
         if dates:
@@ -330,11 +346,12 @@ class FactorCalculator:
 
         # Select parallel or sequential reading based on the number of files
         if len(file_paths) > 60:  # Use parallel processing when there are many files
-            return self._parallel_load_minute_data(file_paths, fields)
+            return FactorCalculator._parallel_load_minute_data(file_paths, fields)
         else:
-            return self._sequential_load_minute_data(file_paths, fields)
+            return FactorCalculator._sequential_load_minute_data(file_paths, fields)
 
-    def _parallel_load_minute_data(self, file_paths: List[Path], fields: List[str]) -> pd.DataFrame:
+    @staticmethod
+    def _parallel_load_minute_data(file_paths: List[Path], fields: List[str]) -> pd.DataFrame:
         """Parallel loading of minute-level data (I/O intensive task)"""
 
         def load_single_file(file_path):
@@ -388,7 +405,8 @@ class FactorCalculator:
 
         return pd.concat(all_data, ignore_index=True)
 
-    def _sequential_load_minute_data(self, file_paths: List[Path], fields: List[str]) -> pd.DataFrame:
+    @staticmethod
+    def _sequential_load_minute_data(file_paths: List[Path], fields: List[str]) -> pd.DataFrame:
         """Load minute data sequentially (used when there are few files)"""
         all_data = []
 
@@ -425,7 +443,8 @@ class FactorCalculator:
 
         return pd.concat(all_data, ignore_index=True)
 
-    def _load_other_frequency_data(self, data_path: Path, dates: List[str], fields: List[str]) -> pd.DataFrame:
+    @staticmethod
+    def _load_other_frequency_data(data_path: Path, dates: List[str], fields: List[str]) -> pd.DataFrame:
         """Load hourly and daily frequency data"""
         file_path = data_path / "all_data.parquet"
         if not file_path.exists():
@@ -435,7 +454,6 @@ class FactorCalculator:
         try:
             # Read only the required columns
             if fields:
-                import pyarrow.parquet as pq
                 schema = pq.read_schema(file_path)
                 available_fields = [col for col in fields if col in schema.names]
                 required_cols = ['symbol', 'timestamp']
@@ -463,7 +481,8 @@ class FactorCalculator:
             warnings.warn(f"Failed to load file {file_path}: {str(e)}")
             return pd.DataFrame()
 
-    def _validate_and_preprocess(self, data: pd.DataFrame, symbols: List[str]) -> pd.DataFrame:
+    @staticmethod
+    def _validate_and_preprocess(data: pd.DataFrame, symbols: List[str]) -> pd.DataFrame:
         """Data Validation and Preprocessing"""
         if data.empty:
             return data
@@ -502,7 +521,6 @@ class FactorCalculator:
             return pd.DataFrame()
 
 
-# customized error
 class FactorRegistryError(Exception): pass
 class FactorNotFoundError(FactorRegistryError): pass
 class FactorFunctionNotFound(FactorRegistryError): pass
@@ -559,6 +577,9 @@ class FactorRegistry:
             **kwargs: Other parameters (such as default parameters, etc.)
         """
         # Get the module path and full name of a function (supports nested functions)
+        if name in self._factors:
+            raise FactorRegistryError(f"Factor '{name}' already registered. Use 'update_factor' to update.")
+
         try:
             module_name = factor_func.__module__
             qualname = factor_func.__qualname__  # Support class methods and nested functions
@@ -598,20 +619,21 @@ class FactorRegistry:
             file_path = Path(file_path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Prepare serializable factor information (excluding function objects)
-            metadata = {}
-            for name, info in self._factors.items():
-                metadata[name] = {
-                    k: v for k, v in info.items()
-                    if k != 'func'  # Exclusion function object
-                }
-
-            with open(file_path, 'w', encoding='utf-8') as f:
+            # 1. Write to a temporary file
+            temp_file = file_path.with_suffix('.tmp')
+            metadata = {
+                name: {k: v for k, v in info.items() if not k.startswith('func_')}
+                for name, info in self._factors.items()
+            }
+            with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+            # 2. Atom replacement
+            temp_file.replace(file_path)
 
             return True
         except Exception as e:
-            print(f"Failed to save factor metadata: {str(e)}")
+            logger.error(f"Failed to save metadata to {file_path}: {str(e)}", exc_info=True)
             return False
 
     def load_from_file(self, file_path: str) -> bool:
@@ -671,7 +693,7 @@ class FactorRegistry:
         """Obtain detailed information about specific factors"""
         if name not in self._factors:
             return None
-        return {k: v for k, v in self._factors[name].items() if not k.startswith('func_')}
+        return {k: v for k, v in self._factors[name].items() if k not in ['func']}
 
     def update_factor(self, name: str, update_type: str = UPDATE_TYPE_DATA, **kwargs) -> bool:
         """Update factor information"""
@@ -698,19 +720,24 @@ class FactorRegistry:
         return True
 
     def _log_update(self, name: str, update_type: str, message: str):
-        """Internal: log an update or deletion"""
+        """Internal: append a single log entry safely"""
         log_entry = {
+            'factor': name,
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'type': update_type,
             'message': message
         }
-        # --- save all log to file ---
+
         try:
-            with open(self._log_file, 'w', encoding='utf-8') as f:
-                # save whole _logs dict
-                json.dump(dict(self._logs), f, indent=2, ensure_ascii=False)
+            # Use 'a' mode to append, with each log on a separate line (JSON Lines format)
+            with open(self._log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+
+            # Simultaneously update the logs in memory (for get_update_log)
+            self._logs[name].append(log_entry)
+
         except Exception as e:
-            logger.error(f"Failed to save log to {self._log_file}: {str(e)}")
+            logger.error(f"Failed to append log entry: {str(e)}", exc_info=True)
 
     def get_update_log(self, name: str) -> List[Dict]:
         """Get update history for a factor"""
@@ -844,3 +871,6 @@ class FactorRegistry:
         else:
             print("Registry file path not set")
             return False
+
+    def exists(self, name: str) -> bool:
+        return name in self._factors
