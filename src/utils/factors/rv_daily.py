@@ -1,4 +1,4 @@
-"""Realized volatility factor compatible with CalFactorFramework."""
+"""Realized volatility factor computed from aggregated OHLCV tables."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from ._base import ensure_trade_date, finalize, prepare_minute_frame, to_float64
+from ._base import finalize
 
 REQUIRED_FIELDS: Iterable[str] = (
     "symbol",
@@ -16,19 +16,35 @@ REQUIRED_FIELDS: Iterable[str] = (
 )
 
 FACTOR_NAME = "rv_daily"
-DESCRIPTION = "Daily realised variance broadcast to minute bars"
+DESCRIPTION = "Daily realised variance computed from aggregated bars"
 CATEGORY = "volatility"
-DEFAULT_FREQUENCY = "min"
+DEFAULT_FREQUENCY = "hour"
 
 
-def compute(data: pd.DataFrame, price_col: str = "Close", eps: float = 1e-12) -> pd.DataFrame:
+def _to_utc_datetime(series: pd.Series) -> pd.Series:
+    if np.issubdtype(series.dtype, np.integer):
+        return pd.to_datetime(series, unit="ms", utc=True, errors="coerce")
+    return pd.to_datetime(series, utc=True, errors="coerce")
+
+
+def compute(
+    data: pd.DataFrame,
+    price_col: str = "Close",
+    eps: float = 1e-12,
+) -> pd.DataFrame:
     if data.empty:
         return pd.DataFrame(columns=["symbol", "timestamp", FACTOR_NAME])
 
-    df, original_index = prepare_minute_frame(data)
-    trade_date = ensure_trade_date(df)
+    df = data.sort_values([c for c in ("symbol", "timestamp") if c in data.columns]).copy()
+    original_index = df.index
 
-    price = to_float64(df[price_col]).clip(lower=eps)
+    if price_col not in df.columns:
+        raise ValueError(f"Column '{price_col}' not found in input data")
+
+    ts = _to_utc_datetime(df["timestamp"])
+    trade_date = ts.dt.strftime("%Y%m%d")
+
+    price = df[price_col].astype("float64").clip(lower=eps)
     log_ret = np.log(price).groupby(df["symbol"], sort=False).diff()
     log_ret_sq = log_ret.fillna(0.0).pow(2)
 
@@ -40,13 +56,10 @@ def compute(data: pd.DataFrame, price_col: str = "Close", eps: float = 1e-12) ->
             "symbol": df["symbol"].values,
             "timestamp": df["timestamp"].values,
             FACTOR_NAME: rv.values,
+            "trade_date": trade_date.values,
         },
-        index=df.index,
+        index=original_index,
     )
-    if "trade_date" in df.columns:
-        result["trade_date"] = df["trade_date"].values
-    else:
-        result["trade_date"] = trade_date.values
 
     return finalize(result, original_index)
 
