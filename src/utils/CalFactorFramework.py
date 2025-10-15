@@ -855,7 +855,8 @@ class FactorRegistry:
         """
         try:
             pq_path = self.data_root / "factors" / f"{self._factors[name]['type']}" / f"factor_{name}.parquet"
-            return pd.read_parquet(pq_path)
+            temp_factor = pd.read_parquet(pq_path)
+            return temp_factor
         except Exception as e:
             logger.error(f"Failed to retrieve data for factor '{name}': {str(e)}")
             raise
