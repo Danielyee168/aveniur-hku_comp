@@ -173,3 +173,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# Example usage:
+# PYTHONPATH=/home/mfin7037_best_students/multi_branch_gru/aveniur-hku_comp \
+# /home/mfin7037_best_students/miniconda3/envs/nlp/bin/python scripts/run_hourly_factors.py
