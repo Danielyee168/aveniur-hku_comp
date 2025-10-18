@@ -7,14 +7,13 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from ._base import finalize, prepare_minute_frame
+from ._base import finalize, prepare_minute_frame, to_float64
 
 
 REQUIRED_FIELDS: Iterable[str] = (
     "symbol",
     "timestamp",
-    "mu_hat",
-    "sigma_hat",
+    "Close",
 )
 
 FACTOR_NAME = "mom_mu_over_sigma2"
@@ -28,21 +27,36 @@ def compute(
     mu_col: str = "mu_hat",
     sigma_col: str = "sigma_hat",
     min_sigma: float = 1e-6,
+    lookback_mu: int = 252,
+    lookback_sigma: int = 252,
+    price_col: str = "Close",
 ) -> pd.DataFrame:
     """Return μ̂/σ̂² weights given predicted mean/vol columns."""
 
-    required = {mu_col, sigma_col}
-    missing = required - set(data.columns)
-    if missing:
-        raise KeyError(f"Missing columns required for μ/σ² weighting: {missing}")
+    if lookback_mu <= 0 or lookback_sigma <= 0:
+        raise ValueError("lookback_mu and lookback_sigma must be positive")
 
     if data.empty:
         return pd.DataFrame(columns=["symbol", "timestamp", FACTOR_NAME])
 
     df, original_index = prepare_minute_frame(data)
 
-    mu = df[mu_col].astype(float)
-    sigma = df[sigma_col].astype(float).replace([np.inf, -np.inf], np.nan)
+    if mu_col in df.columns and sigma_col in df.columns:
+        mu = df[mu_col].astype(float)
+        sigma = df[sigma_col].astype(float).replace([np.inf, -np.inf], np.nan)
+    else:
+        price = to_float64(df[price_col])
+        ret = price.groupby(df["symbol"], sort=False).pct_change()
+
+        grouped = ret.groupby(df["symbol"], sort=False)
+        mu = grouped.transform(
+            lambda s: s.rolling(window=lookback_mu, min_periods=lookback_mu).mean()
+        )
+        sigma = grouped.transform(
+            lambda s: s.rolling(window=lookback_sigma, min_periods=lookback_sigma).std(ddof=0)
+        )
+
+    mu = mu.fillna(0.0)
     sigma = sigma.clip(lower=min_sigma)
 
     weight = mu / (sigma ** 2)
