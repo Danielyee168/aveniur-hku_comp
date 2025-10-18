@@ -7,13 +7,13 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from ._base import finalize, prepare_minute_frame
+from ._base import finalize, prepare_minute_frame, to_float64
 
 
 REQUIRED_FIELDS: Iterable[str] = (
     "symbol",
     "timestamp",
-    "residual",
+    "Close",
 )
 
 FACTOR_NAME = "mom_residual"
@@ -27,6 +27,7 @@ def compute(
     residual_col: str = "residual",
     lookback: int = 252,
     skip: int = 21,
+    price_col: str = "Close",
 ) -> pd.DataFrame:
     """Compute residual momentum with skip-period exclusion."""
 
@@ -40,11 +41,14 @@ def compute(
     if data.empty:
         return pd.DataFrame(columns=["symbol", "timestamp", FACTOR_NAME])
 
-    if residual_col not in data.columns:
-        raise KeyError(f"Data must contain column '{residual_col}' for residual momentum")
-
     df, original_index = prepare_minute_frame(data)
-    resid = df[residual_col].astype(float)
+    if residual_col in df.columns:
+        resid = df[residual_col].astype(float)
+    else:
+        price = to_float64(df[price_col])
+        ret = price.groupby(df["symbol"], sort=False).pct_change()
+        cross_mean = ret.groupby(df["timestamp"], sort=False).transform("mean")
+        resid = (ret - cross_mean).fillna(0.0)
 
     def _resid_mom(series: pd.Series) -> pd.Series:
         roll = series.rolling(window=lookback, min_periods=lookback).sum()
@@ -52,6 +56,7 @@ def compute(
             recent = series.rolling(window=skip, min_periods=skip).sum()
             roll = roll - recent
         sigma = series.rolling(window=lookback - skip, min_periods=lookback - skip).std(ddof=0)
+        sigma = sigma.replace(0.0, np.nan)
         return roll / sigma
 
     signal = resid.groupby(df["symbol"], sort=False).transform(_resid_mom)

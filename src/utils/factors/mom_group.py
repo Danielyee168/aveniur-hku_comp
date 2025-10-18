@@ -7,6 +7,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+import re
+
 from ._base import finalize, prepare_minute_frame, to_float64
 
 
@@ -35,6 +37,18 @@ def _group_price(df: pd.DataFrame, group_col: str, price_col: str) -> pd.DataFra
     return grouped
 
 
+def _derive_group(symbols: pd.Series) -> pd.Series:
+    base = symbols.astype(str)
+    base = base.str.replace(r"^[0-9]+", "", regex=True)
+    base = base.str.replace("USDT", "", regex=False)
+    base = base.str.replace("USD", "", regex=False)
+    base = base.str.replace("PERP", "", regex=False)
+    base = base.str.strip()
+    base = base.str.upper()
+    base = base.replace("", pd.NA)
+    return base.fillna(symbols.astype(str))
+
+
 def compute(
     data: pd.DataFrame,
     group_col: str = "group",
@@ -44,10 +58,11 @@ def compute(
 ) -> pd.DataFrame:
     """Momentum computed on group-average prices and mapped back to constituents."""
 
-    if group_col not in data.columns:
-        raise KeyError(f"Data must contain '{group_col}' to compute group momentum")
-
     df, original_index = prepare_minute_frame(data)
+
+    if group_col not in df.columns:
+        df = df.copy()
+        df[group_col] = _derive_group(df["symbol"])
 
     grouped_price = _group_price(df, group_col, price_col)
     grouped_result = mom_cross_sectional_compute(grouped_price, lookback, skip)
@@ -58,6 +73,13 @@ def compute(
         on=[group_col, "timestamp"],
         how="left",
     )
+
+    if "timestamp_x" in merged.columns:
+        merged = merged.rename(columns={"timestamp_x": "timestamp"})
+    if "timestamp_y" in merged.columns:
+        merged = merged.drop(columns=["timestamp_y"])
+
+    merged.index = df.index
 
     merged = merged[["symbol", "timestamp", FACTOR_NAME]]
     return finalize(merged, original_index)
@@ -99,7 +121,7 @@ def register(registry) -> None:
         registry.register(
             **kwargs,
             frequency=DEFAULT_FREQUENCY,
-            fields=list(REQUIRED_FIELDS) + ["group"],
+            fields=list(REQUIRED_FIELDS),
             type_="alpha",
             window_size=0,
         )
@@ -107,5 +129,5 @@ def register(registry) -> None:
         registry.register(
             **kwargs,
             default_frequency=DEFAULT_FREQUENCY,
-            default_fields=list(REQUIRED_FIELDS) + ["group"],
+            default_fields=list(REQUIRED_FIELDS),
         )

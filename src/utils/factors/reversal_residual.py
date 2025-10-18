@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import Iterable
 
+import numpy as np
 import pandas as pd
 
-from ._base import finalize, prepare_minute_frame
+from ._base import finalize, prepare_minute_frame, to_float64
 
 
 REQUIRED_FIELDS: Iterable[str] = (
     "symbol",
     "timestamp",
-    "residual",
+    "Close",
 )
 
 FACTOR_NAME = "rev_residual"
@@ -25,20 +26,24 @@ def compute(
     data: pd.DataFrame,
     residual_col: str = "residual",
     lag: int = 1,
+    price_col: str = "Close",
 ) -> pd.DataFrame:
     """Return the negative of lagged residuals."""
 
     if lag <= 0:
         raise ValueError("lag must be positive")
 
-    if residual_col not in data.columns:
-        raise KeyError(f"Data must contain '{residual_col}' for residual reversal")
-
     if data.empty:
         return pd.DataFrame(columns=["symbol", "timestamp", FACTOR_NAME])
 
     df, original_index = prepare_minute_frame(data)
-    resid = df[residual_col].astype(float)
+    if residual_col in df.columns:
+        resid = df[residual_col].astype(float)
+    else:
+        price = to_float64(df[price_col])
+        ret = price.groupby(df["symbol"], sort=False).pct_change()
+        cross_mean = ret.groupby(df["timestamp"], sort=False).transform("mean")
+        resid = (ret - cross_mean).fillna(0.0)
 
     signal = -resid.groupby(df["symbol"], sort=False).shift(lag)
 
