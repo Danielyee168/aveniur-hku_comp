@@ -7,7 +7,7 @@ from typing import (
 from datetime import datetime as dt
 from config import PARQUET_PATH, DATA_FREQUENCY
 
-class Kline(object)：
+class Kline(object):
     PATH = None  # Path to the parquet file repository
     Data = None
 

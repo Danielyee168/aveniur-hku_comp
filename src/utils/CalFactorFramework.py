@@ -18,6 +18,8 @@ from collections import defaultdict
 import logging
 import warnings
 
+from nbclient.client import timestamp
+
 warnings.filterwarnings("ignore")
 
 
@@ -48,6 +50,7 @@ class FactorCalculator:
                          factor_name: str = None,
                          factor_type: str = None,
                          window_size: int = 0,
+                         save_p: bool = True,
                          **factor_kwargs) -> pd.DataFrame:
         """
         Core factor calculation method
@@ -72,8 +75,6 @@ class FactorCalculator:
         # Determine factor type
         if factor_type is None:
             factor_type = "alpha" if "alpha" in factor_name.lower() else "risk"
-
-        factor_path = self.data_root / "factors" / f"{factor_type}" / f"factor_{factor_name}.parquet"
 
         if not parallel or frequency != "min":
             # Direct calculation
@@ -107,7 +108,9 @@ class FactorCalculator:
         factor_df = factor_df.drop_duplicates()
         factor_df.dropna(inplace=True)
         factor_df.sort_values(['timestamp', 'symbol'])
-        factor_df.to_parquet(factor_path, index=False)
+        if save_p:
+            factor_path = self.data_root / "factors" / f"{factor_type}" / f"factor_{factor_name}.parquet"
+            factor_df.to_parquet(factor_path, index=False)
         return factor_df
 
     def calculate_factor_incremental(self,
@@ -185,13 +188,13 @@ class FactorCalculator:
                 fields=fields,
                 dates=chunk_dates,
                 symbols=symbols,
-                # parallel=(n_jobs > 1) & (len(chunk_dates) > parallel_batch_size),
                 parallel=(n_jobs > 1),
                 n_jobs=n_jobs,
                 factor_name=factor_name,
                 factor_type=factor_type,
                 window_size=window_size,
                 parallel_batch_size=parallel_batch_size,
+                save_p=False,
                 **factor_kwargs
             )
 
@@ -200,20 +203,23 @@ class FactorCalculator:
 
             gc.collect()
 
-            if window_size > 0:
-                start = max(end - window_size, start + 1)
+            if end < len(target_dates):
+                if window_size > 0:
+                    start = max(end - window_size, start + 1)
+                else:
+                    start = end
             else:
-                start = end
+                break
 
-        factor_df = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
-
-        factor_path = self.data_root / f"{frequency}_data" / f"{factor_type}" / f"factor_{factor_name}.parquet"
+        factor_df = pd.concat(all_results, axis=0) if all_results else pd.DataFrame()
+        factor_path = self.data_root / "factors" / f"{factor_type}" / f"factor_{factor_name}.parquet"
         if not factor_df.empty:
             factor_df = factor_df.drop_duplicates()
             factor_df.dropna(inplace=True)
             if {'timestamp', 'symbol'}.issubset(factor_df.columns):
                 factor_df = factor_df.sort_values(['timestamp', 'symbol'])
             factor_path.parent.mkdir(parents=True, exist_ok=True)
+            factor_df.reset_index(drop=True, inplace=True)
             factor_df.to_parquet(factor_path, index=False)
         else:
             warnings.warn("No factor results produced for the requested date range.")
@@ -231,11 +237,11 @@ class FactorCalculator:
                                             symbols: List[str],
                                             factor_kwargs: Dict) -> pd.DataFrame:
         """Parallel computing with batching"""
-
         batches = self._create_date_batches(dates, window_size, parallel_batch_size)
 
         # If there is no batch (small amount of data), compute directly.
         if len(batches) == 1:
+            print('trigger', dates)
             # 1. Data Loading
             data = FactorCalculator._load_data(frequency, dates, fields)
 
@@ -290,6 +296,9 @@ class FactorCalculator:
             batches.append(batch_dates)
             last = i - window_size
 
+        if dates[last] != dates[-1]:
+            batches.append(dates[last:])
+
         if len(batches) > 0:
             return batches
         else:
@@ -308,7 +317,7 @@ class FactorCalculator:
 
             # Standardized result format
             if isinstance(result, pd.Series):
-                result = result.to_frame(name=factor_func.__name__)
+                result = result.reset_index()
 
             return result
         except Exception as e:
@@ -513,7 +522,7 @@ class FactorCalculator:
 
             # Standardized result format
             if isinstance(result, pd.Series):
-                result = result.to_frame(name=factor_func.__name__)
+                result = result.reset_index()
 
             return result
         except Exception as e:
@@ -622,7 +631,7 @@ class FactorRegistry:
             # 1. Write to a temporary file
             temp_file = file_path.with_suffix('.tmp')
             metadata = {
-                name: {k: v for k, v in info.items() if not k.startswith('func_')}
+                name: {k: v for k, v in info.items()}
                 for name, info in self._factors.items()
             }
             with open(temp_file, 'w', encoding='utf-8') as f:
@@ -647,26 +656,9 @@ class FactorRegistry:
             with open(file_path, 'r', encoding='utf-8') as f:
                 metadata = json.load(f)
 
-            # Update the registry (only update metadata, do not overwrite functions)
-            for name, info in metadata.items():
-                if name in self._factors:
-                    # Update the metadata of existing factors while retaining the functions
-                    for k, v in info.items():
-                        if not k.startswith('func_'):
-                            self._factors[name][k] = v
-                    self._factors[name]['updated_time'] = datetime.now(timezone.utc).isoformat()
-                    self._log_update(name, self.UPDATE_TYPE_DATA, "Metadata updated from file")
-                else:
-                    # New factor, requires manual registration of functions later
-                    info['func_module'] = None
-                    info['func_qualname'] = None
-                    info['created_time'] = datetime.now(timezone.utc).isoformat()
-                    info['updated_time'] = datetime.now(timezone.utc).isoformat()
-                    self._factors[name] = info
-                    self._log_update(name, self.UPDATE_TYPE_DATA, "Loaded from file (function not bound)")
-
-                logger.info(f"Loaded metadata for {len(metadata)} factors from {file_path}")
-
+            # Update the registry (only update metadata)
+            self._factors.update(metadata)
+            logger.info(f"Loaded metadata for {len(metadata)} factors from {file_path}")
             print(f"Loaded metadata for {len(metadata)} factors from {file_path}")
             return True
         except Exception as e:

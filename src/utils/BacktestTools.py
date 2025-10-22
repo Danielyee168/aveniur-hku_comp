@@ -8,14 +8,11 @@ from typing import Dict, Any, Optional, List, Union
 import pandas as pd
 import numpy as np
 import logging
-from dataclasses import dataclass
 import seaborn as sns
 import matplotlib.pyplot as plt
-from pandas.tseries.frequencies import to_offset
 import warnings
 from scipy import stats
 import json
-from datetime import datetime
 import statsmodels.api as sm
 from statsmodels.stats.diagnostic import het_breuschpagan
 from statsmodels.stats.stattools import durbin_watson
@@ -27,7 +24,7 @@ from config import TRADE_LIST
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
 
-# 配置日志
+# deploy logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -208,13 +205,14 @@ class SingleAlphaFactorBacktester(BaseBacktester):
         # 2. Core Analysis Module
         ic_stats = self._compute_ic_analysis(factor, returns)
         factor_direction = 'positive' if ic_stats['mean_ic'] > 0 else 'negative'
-        quantile_analysis, turnover_analysis = self._compute_quantile_analysis(factor, returns, factor_direction, n_quantiles=5)
+        quantile_analysis, turnover_analysis = self._compute_quantile_analysis(factor, returns, factor_direction, n_quantiles=self.config["n_quantiles"])
 
         # 3. Summary of results
         result = {
             "ic": ic_stats["mean_ic"],
             "ic_ir": ic_stats["ic_ir"],
             "rank_ic": ic_stats["mean_rank_ic"],
+            "rank_ic_ir": ic_stats["rank_ic_ir"],
             "ic_hit_rate": ic_stats["hit_rate"],
             "quantile_spread_return": quantile_analysis["spread_return"],
             "quantile_tstat": quantile_analysis["tstat"],
@@ -303,8 +301,10 @@ class SingleAlphaFactorBacktester(BaseBacktester):
         def scale_weight(g):
             k_l = sum(g['position'] == 1)
             k_s = sum(g['position'] == -1)
-            g['weight'] = g['position'].map({1: 1.0 / k_l,
-                                             -1: -1.0 / k_s,
+            k1 = 1.0 / k_l if k_l != 0 else 0
+            k2 = 1.0 / k_s if k_s != 0 else 0
+            g['weight'] = g['position'].map({1: k1,
+                                             -1: k2,
                                              0: 0.0})
             return g
 
@@ -316,12 +316,11 @@ class SingleAlphaFactorBacktester(BaseBacktester):
                 "group_acc_returns": group_accumulated_returns,
                 "spread_return": spread_return,
                 "tstat": tstat,
-                "p_value": p_one_sided}, {"mean_daily_turnover": turnover,
-                "mean_yearly_turnover": turnover * 365,
+                "p_value": p_one_sided}, {"mean_turnover": turnover,
                 "turnover_series": turn_sr}
 
     # —————————————————— visualization —————————————————— #
-    def plot_summary(self, result: Dict[str, Any], cost_Unilateral: float = 0.003, save_path: str = None):
+    def plot_summary(self, result: Dict[str, Any], cost_Unilateral: float = 0.001, save_path: str = None):
         """plot analytical graphs"""
         ic = result['detailed_results']['ic_series']
         rank_ic = result['detailed_results']['rank_ic_series']
@@ -382,6 +381,15 @@ class SingleAlphaFactorBacktester(BaseBacktester):
             f"Spread Return: {result['quantile_spread_return']:.4f}, T-stat: {result['quantile_tstat']:.4f}"
         ])
         ax5.text(0.02, 0.9, text, fontsize=12, verticalalignment='top', bbox=dict(boxstyle="round", facecolor="wheat"))
+
+        ax6 = plt.subplot(3, 2, 6)
+        plt.axis('off')
+
+        text1 = "\n".join([
+            f"rank_IC: {result['rank_ic']:.4f}, rank_IR: {result['rank_ic_ir']:.4f}",
+            f"Mean turnover: {result['turnover_sensitivity']['mean_turnover']:.4f}, T-stat: {result['quantile_tstat']:.4f}"
+        ])
+        ax6.text(0.02, 0.9, text1, fontsize=12, verticalalignment='top', bbox=dict(boxstyle="round", facecolor="wheat"))
 
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')

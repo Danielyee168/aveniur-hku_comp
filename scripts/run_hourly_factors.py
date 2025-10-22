@@ -10,7 +10,7 @@ import pyarrow.parquet as pq
 
 from config import TRADE_LIST
 from src.utils.CalFactorFramework import FactorCalculator, FactorRegistry
-from src.utils import factors
+from src.models import factors
 
 LOGGER = logging.getLogger("run_hourly_factors")
 DATA_ROOT = Path("./data")
