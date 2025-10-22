@@ -17,6 +17,7 @@ import gc
 from collections import defaultdict
 import logging
 import warnings
+from config import TRADE_LIST, TRADE_LIST_FILTERED
 
 from nbclient.client import timestamp
 
@@ -69,6 +70,9 @@ class FactorCalculator:
             factor_type: 'alpha' or 'risk',
             window_size: Size of the lookback window
         """
+        if symbols is None:
+            symbols = TRADE_LIST_FILTERED
+
         if factor_name is None:
             factor_name = factor_func.__name__
 
@@ -142,6 +146,9 @@ class FactorCalculator:
             factor_type: 'alpha' or 'risk',
             window_size: Size of the lookback window
         """
+        if symbols is None:
+            symbols = TRADE_LIST_FILTERED
+
         if factor_name is None:
             factor_name = factor_func.__name__
 

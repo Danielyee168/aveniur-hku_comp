@@ -19,7 +19,7 @@ from statsmodels.stats.stattools import durbin_watson
 from sklearn.linear_model import LinearRegression
 from dataclasses import dataclass
 
-from config import TRADE_LIST
+# from config import TRADE_LIST
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -110,7 +110,7 @@ class BaseBacktester(ABC):
         if context.offset:
             freq = freq + " " + context.offset  # For example, '4H 2H' → every 4 hours, starting from 2 hours
 
-        df = df[df.index.get_level_values(0).isin(TRADE_LIST)]  # filter coins
+        # df = df[df.index.get_level_values(0).isin(TRADE_LIST)]  # filter coins
 
         factor_aligned = df[context.factor_name].groupby(level=0).apply(lambda x: x.reset_index(level=0, drop=True).resample(freq).last())
         price_aligned = df[context.price_col].groupby(level=0).apply(lambda x: x.reset_index(level=0, drop=True).resample(freq).last())
