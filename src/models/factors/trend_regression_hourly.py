@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-DEFAULT_LOOKAHEAD_HOURS = 8
+DEFAULT_LOOKAHEAD_HOURS = 4
 DEFAULT_BETA_EMA_SPAN = 48
 FACTOR_NAME = f"trend_hour_{DEFAULT_LOOKAHEAD_HOURS}h"
 DESCRIPTION = (
@@ -43,6 +43,8 @@ LLT_SPECS: Sequence[_LLTSpec] = (
     _LLTSpec(720, 480),
     _LLTSpec(1200, 720),
 )
+
+DEFAULT_WARMUP_HOURS = LLT_SPECS[-1].window
 
 VOLUME_SPECS: Dict[int, _RollingSpec] = {
     4: _RollingSpec(4, 3),
@@ -239,6 +241,7 @@ def compute(
     *,
     lookahead_hours: int = DEFAULT_LOOKAHEAD_HOURS,
     beta_span: int | None = None,
+    warmup_hours: int | None = None,
     col_name: str | None = None,
 ) -> pd.DataFrame:
     if data.empty:
@@ -249,6 +252,9 @@ def compute(
         col_name = f"trend_hour_{lookahead_hours}h"
     if beta_span is None:
         beta_span = max(int(lookahead_hours * 12), 1)
+    if warmup_hours is None:
+        warmup_hours = DEFAULT_WARMUP_HOURS
+    warmup_hours = max(int(warmup_hours), 0)
 
     panel, timestamp_map = _prepare_panel(data, price_col, volume_col, lookahead_hours)
     panel = _normalize_features(panel)
@@ -280,6 +286,15 @@ def compute(
     if symbol_level is None:
         symbol_level = "symbol"
     factor_df = factor_df.rename(columns={ts_level: "timestamp_dt", symbol_level: "symbol"})
+
+    if warmup_hours > 0 and not factor_df.empty:
+        min_ts = factor_df["timestamp_dt"].min()
+        if pd.notna(min_ts):
+            cutoff = min_ts + pd.Timedelta(hours=warmup_hours)
+            factor_df = factor_df[factor_df["timestamp_dt"] >= cutoff]
+            if factor_df.empty:
+                return pd.DataFrame(columns=["symbol", "timestamp", col_name])
+
     factor_df["timestamp"] = factor_df["timestamp_dt"].map(timestamp_map)
     factor_df = factor_df.dropna(subset=["timestamp"])
     factor_df = factor_df.drop(columns=["timestamp_dt"])
@@ -289,7 +304,14 @@ def compute(
     return result
 
 
-def register(registry, *, lookahead_hours: int = DEFAULT_LOOKAHEAD_HOURS) -> None:
+def register(
+    registry,
+    *,
+    lookahead_hours: int = DEFAULT_LOOKAHEAD_HOURS,
+    warmup_hours: int | None = None,
+) -> None:
+    if warmup_hours is None:
+        warmup_hours = DEFAULT_WARMUP_HOURS
     name = f"trend_hour_{lookahead_hours}h"
     description = (
         "Trend factor using LLT and volume signals with "
@@ -304,4 +326,5 @@ def register(registry, *, lookahead_hours: int = DEFAULT_LOOKAHEAD_HOURS) -> Non
         category=CATEGORY,
         description=description,
         lookahead_hours=lookahead_hours,
+        warmup_hours=warmup_hours,
     )

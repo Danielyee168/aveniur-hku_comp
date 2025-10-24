@@ -1,6 +1,8 @@
 # Data files - too large for GitHub
 kline_data/
 *.parquet
+*.pkl
+data/**/*.pkl
 
 # macOS
 .DS_Store
