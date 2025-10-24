@@ -267,9 +267,21 @@ class SingleAlphaFactorBacktester(BaseBacktester):
     def _compute_quantile_analysis(self, factor: pd.Series, returns: pd.Series, factor_direction: str, n_quantiles: int = 5) -> \
     tuple[dict[str, int | Any], dict[str, Any]]:
         """Grouped backtesting: Calculate the average return of each quantile"""
-        df = pd.DataFrame({'factor': factor, 'return': returns})
-        df['quantile'] = df.groupby(level=0)['factor'].transform(
-            lambda x: pd.qcut(x, n_quantiles, labels=False, duplicates='drop'))
+        df = pd.DataFrame({"factor": factor, "return": returns})
+
+        def _assign_cross_sectional_bins(x: pd.Series) -> pd.Series:
+            valid = x.dropna()
+            if valid.nunique() < n_quantiles:
+                return pd.Series(np.nan, index=x.index)
+            try:
+                bins = pd.qcut(valid, n_quantiles, labels=False, duplicates="drop")
+            except ValueError:
+                return pd.Series(np.nan, index=x.index)
+            out = pd.Series(np.nan, index=x.index, dtype="float64")
+            out.loc[bins.index] = bins.astype("float64")
+            return out
+
+        df["quantile"] = df.groupby(level=1)["factor"].transform(_assign_cross_sectional_bins)
 
         # Calculate the average revenue by date and group
         group_returns = df.groupby([df.index.get_level_values(1), 'quantile'])['return'].mean()
