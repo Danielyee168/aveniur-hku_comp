@@ -111,7 +111,10 @@ class FactorCalculator:
 
         factor_df = factor_df.drop_duplicates()
         factor_df.dropna(inplace=True)
-        factor_df.sort_values(['timestamp', 'symbol'])
+        # trend_regression_hourly may emit an empty frame after warm-up trimming;
+        # guard against KeyError when timestamp/symbol columns are absent
+        if {'timestamp', 'symbol'}.issubset(factor_df.columns):
+            factor_df = factor_df.sort_values(['timestamp', 'symbol'])
         if save_p:
             factor_path = self.data_root / "factors" / f"{factor_type}" / f"factor_{factor_name}.parquet"
             factor_df.to_parquet(factor_path, index=False)
