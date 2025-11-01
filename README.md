@@ -8,10 +8,10 @@ project-root/
 │   └── utils/      # 工具函数(数据清洗函数、数据制图函数、算子……)  
 ├── testNotebook/        # 测试代码(ipynb)  
 ├── data/         # 数据  
-│   ├── raw/        # 原始数据  
-│   ├── washed/     # 处理后数据(清洗后数据)  
-│   └── forecast/   # 工具函数  
-└── config/       # 配置文件  
+│   ├── min_data/   # 分钟数据  
+│   ├── hour_data/   # 小时数据  
+│   └── daily_data/   # 日度数据  
+└── config/       # 配置文件
 ## Branches
 ### main
 Official version, storing executable code. 
