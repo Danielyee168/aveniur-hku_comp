@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -17,7 +18,7 @@ BASE_URL = "https://mock-api.roostoo.com"
 DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
 REQUEST_TIMEOUT = 10
 
-MAX_RETRIES = 10
+MAX_RETRIES = 15
 RETRY_DELAY_SECONDS = 1
 WAIT_EVENT = threading.Event()
 
@@ -143,3 +144,24 @@ def collect_once(session: requests.Session) -> None:
                 RETRY_DELAY_SECONDS,
             )
             WAIT_EVENT.wait(timeout=RETRY_DELAY_SECONDS)
+
+
+def delete_old_data(retention_days: int = 3, root: Path = DATA_ROOT) -> None:
+    """Remove dated data directories older than the retention window."""
+    if retention_days < 0:
+        return
+
+    cutoff_date = datetime.now().astimezone().date() - timedelta(days=retention_days)
+    if not root.exists():
+        return
+
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            folder_date = datetime.strptime(child.name, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+
+        if folder_date < cutoff_date:
+            shutil.rmtree(child, ignore_errors=True)
