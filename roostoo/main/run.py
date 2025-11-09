@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from logging.handlers import TimedRotatingFileHandler
 
 import requests
-from logging.handlers import TimedRotatingFileHandler
-from pathlib import Path
 
 from market_data_collector import collect_once, next_minute_boundary, wait_until, delete_old_data
 from calc_util import load_data
@@ -17,6 +17,7 @@ from order_executor import rebalance_portfolio
 from rv import compute
 
 SIGNAL_HOURS = {6, 18}  # local time hours when we run signal generation
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
@@ -28,7 +29,7 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     
-    logs_dir = Path("/Users/mikey/Desktop/aveniur-hku_comp/roostoo/logs")
+    logs_dir = PROJECT_ROOT / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = logs_dir / "collector.log"
